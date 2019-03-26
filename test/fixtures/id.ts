@@ -28,7 +28,8 @@ export const machine = Machine({
         foo: {
           id: 'B_foo',
           on: {
-            NEXT: '#B_bar'
+            NEXT: '#B_bar',
+            NEXT_DOT: '#B.dot'
           }
         },
         bar: {
@@ -36,7 +37,32 @@ export const machine = Machine({
           on: {
             NEXT: '#A_foo'
           }
+        },
+        dot: {
+          id: 'B.dot'
         }
+      }
+    },
+    getter: {
+      on: {
+        get NEXT() {
+          return machine.states.A;
+        },
+        get NEXT_DEEP() {
+          return machine.states.A.states.foo;
+        },
+        NEXT_TARGET: {
+          get target() {
+            return machine.states.B;
+          }
+        },
+        NEXT_TARGET_ARRAY: [
+          {
+            get target() {
+              return machine.states.B;
+            }
+          }
+        ]
       }
     }
   }

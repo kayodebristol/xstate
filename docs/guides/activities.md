@@ -4,10 +4,42 @@ An activity is an action that occurs over time, and can be started and stopped. 
 
 > An activity always takes a nonzero amount of time, like beeping, displaying, or executing lengthy computations.
 
-In `xstate`, activities are specified on the `activities` property of a state node. When a state node is entered, an interpreter should **start** its activities, and when it is exited, it should **stop** its activities.
+For example, a toggle that "beeps" when active can be represented by a `'beeping'` activity:
 
-To determine which activities are currently active, the `State` instance returned from a `machine.transition(...)` call has an `activities` property, which is a mapping of activity names to `true` if the activity is started (active), and `false` if it is stopped.
+```js
+const toggleMachine = Machine(
+  {
+    id: 'toggle',
+    initial: 'inactive',
+    states: {
+      inactive: {
+        on: { TOGGLE: 'active' }
+      },
+      active: {
+        // The 'beeping' activity will take place as long as
+        // the machine is in the 'active' state
+        activities: ['beeping'],
+        on: { TOGGLE: 'inactive' }
+      }
+    }
+  },
+  {
+    activities: {
+      beeping: () => {
+        // Start the beeping activity
+        const interval = setInterval(() => console.log('BEEP!'), 1000);
 
+        // Return a function that stops the beeping activity
+        return () => clearInterval(interval);
+      }
+    }
+  }
+);
+```
+
+In XState, activities are specified on the `activities` property of a state node. When a state node is entered, an interpreter should **start** its activities, and when it is exited, it should **stop** its activities.
+
+To determine which activities are currently active, the `State` has an `activities` property, which is a mapping of activity names to `true` if the activity is started (active), and `false` if it is stopped.
 
 ```js
 const lightMachine = Machine({
@@ -48,7 +80,7 @@ const lightMachine = Machine({
 });
 ```
 
-In the above machine configuration, the `'activateCrosswalkLight'` will start when the `'light.red'` state is entered. It will also execute a special `'xstate.start'` action, letting the interpreter know that it should start the activity:
+In the above machine configuration, the `'activateCrosswalkLight'` will start when the `'light.red'` state is entered. It will also execute a special `'xstate.start'` action, letting the [service](./interpretation.md) know that it should start the activity:
 
 ```js
 const redState = lightMachine.transition('yellow', 'TIMER');
@@ -106,7 +138,7 @@ redStopState.actions;
 And any stopped activities will be stopped only once:
 
 ```js
-const greenState = lightMachine.transition(redStopState, 'PED_STOP');
+const greenState = lightMachine.transition(redStopState, 'TIMER');
 
 green.activities;
 // No active activities
@@ -121,4 +153,84 @@ green.actions;
 // => [
 //   { type: 'xstate.stop', activity: 'activateCrosswalkLight' }
 // ]
+```
+
+## Interpretation
+
+(since 4.0) In the machine options, the "start" and "stop" behavior of the activity can be defined in the `activities` property. This is done by:
+
+- Passing in a function that **starts** the activity (as a side-effect)
+- From that function, returning another function that **stops** the activity (also as a side-effect).
+
+For example, here's how a `'beeping'` activity that logs `'BEEP!'` to the console every `ctx.interval` would be implemented:
+
+```js
+function createBeepingActivity(ctx, activity) {
+  // Start the beeping activity
+  const interval = setInterval(() => {
+    console.log('BEEP!');
+  }, ctx.interval);
+
+  // Return a function that stops the beeping activity
+  return () => clearInterval(interval);
+}
+```
+
+The activity creator is always given two arguments:
+
+- the current `context`
+- the defined `activity`
+  - e.g., `{ type: 'beeping' }`
+
+Then you would pass this into the machine options (second argument) under the `activities` property:
+
+```js
+const toggleMachine = Machine(
+  {
+    id: 'toggle',
+    initial: 'inactive',
+    context: {
+      interval: 1000 // beep every second
+    },
+    states: {
+      inactive: {
+        on: { TOGGLE: 'active' }
+      },
+      active: {
+        activities: ['beeping'],
+        on: { TOGGLE: 'inactive' }
+      }
+    }
+  },
+  {
+    activities: {
+      beeping: createBeepingActivity
+    }
+  }
+);
+```
+
+Using XState's [interpreter](./interpretation.md), every time an action occurs to start an activity, it will call that activity creator to start the activity, and use the returned "stopper" (if it is returned) to stop the activity:
+
+```js
+import { interpret } from 'xstate';
+
+// ... (previous code)
+
+const service = interpret(toggleMachine);
+
+service.start();
+
+// nothing logged yet
+
+service.send('TOGGLE');
+
+// => 'BEEP!'
+// => 'BEEP!'
+// => 'BEEP!'
+// ...
+
+service.send('TOGGLE');
+
+// no more beeps!
 ```

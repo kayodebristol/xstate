@@ -1,37 +1,51 @@
 import { assert } from 'chai';
-import { Machine, matchesState } from '../src/index';
+import { Machine } from '../src/index';
 
 describe('guard conditions', () => {
-  const lightMachine = Machine(
+  // type LightMachineEvents =
+  //   | { type: 'TIMER'; elapsed: number }
+  //   | { type: 'EMERGENCY'; isEmergency: boolean };
+
+  const lightMachine = Machine<{ elapsed: number }>(
     {
       key: 'light',
       initial: 'green',
       states: {
         green: {
           on: {
-            TIMER: {
-              green: {
+            TIMER: [
+              {
+                target: 'green',
                 cond: ({ elapsed }) => elapsed < 100
               },
-              yellow: {
+              {
+                target: 'yellow',
                 cond: ({ elapsed }) => elapsed >= 100 && elapsed < 200
               }
-            },
+            ],
             EMERGENCY: {
-              red: { cond: (_, event) => event.isEmergency }
+              target: 'red',
+              cond: (_, event) => event.isEmergency
             }
           }
         },
         yellow: {
           on: {
             TIMER: {
-              red: { cond: 'minTimeElapsed' }
+              target: 'red',
+              cond: 'minTimeElapsed'
+            },
+            TIMER_COND_OBJ: {
+              target: 'red',
+              cond: {
+                type: 'minTimeElapsed'
+              }
             }
           }
         },
         red: {
           on: {
-            BAD_COND: { red: { cond: 'doesNotExist' } }
+            BAD_COND: { target: 'red', cond: 'doesNotExist' }
           }
         }
       }
@@ -45,36 +59,31 @@ describe('guard conditions', () => {
 
   it('should transition only if condition is met', () => {
     assert.equal(
-      lightMachine
-        .transition('green', 'TIMER', {
-          elapsed: 50
-        })
-        .toString(),
+      lightMachine.transition('green', 'TIMER', {
+        elapsed: 50
+      }).value,
       'green'
     );
 
-    assert.equal(
-      lightMachine
-        .transition('green', 'TIMER', {
-          elapsed: 120
-        })
-        .toString(),
+    assert.deepEqual(
+      lightMachine.transition('green', 'TIMER', {
+        elapsed: 120
+      }).value,
       'yellow'
     );
   });
 
   it('should transition if condition based on event is met', () => {
-    assert.equal(
-      lightMachine
-        .transition('green', { type: 'EMERGENCY', isEmergency: true })
-        .toString(),
+    assert.deepEqual(
+      lightMachine.transition('green', { type: 'EMERGENCY', isEmergency: true })
+        .value,
       'red'
     );
   });
 
   it('should not transition if condition based on event is not met', () => {
-    assert.equal(
-      lightMachine.transition('green', { type: 'EMERGENCY' }).toString(),
+    assert.deepEqual(
+      lightMachine.transition('green', { type: 'EMERGENCY' }).value,
       'green'
     );
   });
@@ -83,12 +92,19 @@ describe('guard conditions', () => {
     const nextState = lightMachine.transition('green', 'TIMER', {
       elapsed: 9000
     });
-    assert.equal(nextState.value, 'green');
+    assert.deepEqual(nextState.value, 'green');
     assert.isEmpty(nextState.actions);
   });
 
   it('should work with defined string transitions', () => {
     const nextState = lightMachine.transition('yellow', 'TIMER', {
+      elapsed: 150
+    });
+    assert.equal(nextState.value, 'red');
+  });
+
+  it('should work with guard objects', () => {
+    const nextState = lightMachine.transition('yellow', 'TIMER_COND_OBJ', {
       elapsed: 150
     });
     assert.equal(nextState.value, 'red');
@@ -109,7 +125,7 @@ describe('guard conditions', () => {
 describe('guard conditions', () => {
   const machine = Machine({
     key: 'microsteps',
-    parallel: true,
+    type: 'parallel',
     states: {
       A: {
         initial: 'A0',
@@ -150,29 +166,25 @@ describe('guard conditions', () => {
               T1: [
                 {
                   target: 'B1',
-                  cond: (_state, _event, interim) =>
-                    matchesState('A.A1', interim)
+                  cond: (_state, _event, { state: s }) => s.matches('A.A1')
                 }
               ],
               T2: [
                 {
                   target: 'B2',
-                  cond: (_state, _event, interim) =>
-                    matchesState('A.A2', interim)
+                  cond: (_state, _event, { state: s }) => s.matches('A.A2')
                 }
               ],
               T3: [
                 {
                   target: 'B3',
-                  cond: (_state, _event, interim) =>
-                    matchesState('A.A3', interim)
+                  cond: (_state, _event, { state: s }) => s.matches('A.A3')
                 }
               ],
               '': [
                 {
                   target: 'B4',
-                  cond: (_state, _event, interim) =>
-                    matchesState('A.A4', interim)
+                  cond: (_state, _event, { state: s }) => s.matches('A.A4')
                 }
               ]
             }
@@ -205,5 +217,61 @@ describe('guard conditions', () => {
       A: 'A5',
       B: 'B4'
     });
+  });
+});
+
+describe('custom guards', () => {
+  const machine = Machine(
+    {
+      id: 'custom',
+      initial: 'inactive',
+      context: {
+        count: 0
+      },
+      states: {
+        inactive: {
+          on: {
+            EVENT: {
+              target: 'active',
+              cond: {
+                type: 'custom',
+                prop: 'count',
+                op: 'greaterThan',
+                compare: 3
+              }
+            }
+          }
+        },
+        active: {}
+      }
+    },
+    {
+      guards: {
+        custom: (ctx, e, meta) => {
+          const { prop, compare, op } = meta.cond as any; // TODO: fix
+          if (op === 'greaterThan') {
+            return ctx[prop] + e.value > compare;
+          }
+
+          return false;
+        }
+      }
+    }
+  );
+
+  it('should evaluate custom guards', () => {
+    const passState = machine.transition(machine.initialState, {
+      type: 'EVENT',
+      value: 4
+    });
+
+    assert.equal(passState.value, 'active');
+
+    const failState = machine.transition(machine.initialState, {
+      type: 'EVENT',
+      value: 3
+    });
+
+    assert.equal(failState.value, 'inactive');
   });
 });

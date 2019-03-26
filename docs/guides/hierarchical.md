@@ -1,8 +1,14 @@
 # Hierarchical State Machines
 
-Statecharts, by nature, are hierarchical - this is an important concept, as it allows refinement of states, grouping of similar transitions, isolation, composability, and prevents state explosion (which frequently occurs in normal finite state machines).
+Statecharts, by definition, are hierarchical - that is to say, they:
 
-In `xstate`, state and machine configuration share a common schema, which allows machines to be _substates_ and for states to be infinitely nested.
+- enable refinement of state
+- can group similar transitions
+- allow isolation
+- encourage composability
+- and prevent state explosion, which frequently occurs in normal finite state machines.
+
+In XState, state and machine configuration share a common schema, which allows machines to be _substates_ and for states to be infinitely nested.
 
 Here's an example of a traffic light machine with nested states:
 
@@ -61,6 +67,7 @@ console.log(lightMachine.transition(lightMachine.initialState, 'TIMER').value);
 ```
 
 When a composite state is entered, its initial state is immediately entered as well. In the following example:
+
 - the `'red'` state is entered
 - since `'red'` has an initial state of `'walk'`, the `{ red: 'walk' }` state is ultimately entered.
 
@@ -72,6 +79,7 @@ console.log(lightMachine.transition('yellow', 'TIMER').value);
 ```
 
 When a simple state does not handle an `event`, that `event` is propagated up to its parent state to be handled. In the following example:
+
 - the `{ red: 'stop' }` state does _not_ handle the `'TIMER'` event
 - the `'TIMER'` event is sent to the `'red'` parent state, which does handle it.
 
@@ -80,7 +88,7 @@ console.log(lightMachine.transition({ red: 'stop' }, 'TIMER').value);
 // => 'green'
 ```
 
-If neither a state nor any of its ancestor (parent) states handle an event, no transition happens. In `strict` mode (specified in the [machine configuration](api/config.md)), this will throw an error.
+If neither a state nor any of its ancestor (parent) states handle an event, no transition happens. In `strict` mode (specified in the [machine configuration](./machines.md#configuration)), this will throw an error.
 
 ```js
 console.log(lightMachine.transition('green', 'UNKNOWN').value);

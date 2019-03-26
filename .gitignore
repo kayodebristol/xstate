@@ -33,5 +33,17 @@ dist/
 lib/
 es/
 editor/
-examples/
+_examples/
+__examples/ 
+
+# Documentation
+docs-src/
+netlify/
+docs/.cache
 !docs/examples/
+
+./public/
+.cache
+
+# Docs
+api/

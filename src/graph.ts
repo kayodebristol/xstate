@@ -1,5 +1,5 @@
 import { StateNode, State } from './index';
-import { toStateValue, getActionType, flatten } from './utils';
+import { getActionType, flatten, keys } from './utils';
 import {
   StateValue,
   Edge,
@@ -9,34 +9,34 @@ import {
   PathsItem,
   PathsMap,
   AdjacencyMap,
-  DefaultExtState,
+  DefaultContext,
   ValueAdjacencyMap,
-  Event
+  Event,
+  EventObject,
+  StateMachine
 } from './types';
+import { toEventObject } from './actions';
 
 const EMPTY_MAP = {};
 
 export function getNodes(node: StateNode): StateNode[] {
   const { states } = node;
-  const nodes = Object.keys(states).reduce(
-    (accNodes: StateNode[], stateKey) => {
-      const subState = states[stateKey];
-      const subNodes = getNodes(states[stateKey]);
+  const nodes = keys(states).reduce((accNodes: StateNode[], stateKey) => {
+    const subState = states[stateKey];
+    const subNodes = getNodes(states[stateKey]);
 
-      accNodes.push(subState, ...subNodes);
-      return accNodes;
-    },
-    []
-  );
+    accNodes.push(subState, ...subNodes);
+    return accNodes;
+  }, []);
 
   return nodes;
 }
 
-export function getEventEdges<TExtState = DefaultExtState>(
-  node: StateNode,
-  event: string
-): Array<Edge<TExtState>> {
-  const transitions = node.on[event]!;
+export function getEventEdges<
+  TContext = DefaultContext,
+  TEvent extends EventObject = EventObject
+>(node: StateNode<TContext>, event: string): Array<Edge<TContext, TEvent>> {
+  const transitions = node.definition.on[event];
 
   return flatten(
     transitions.map(transition => {
@@ -60,7 +60,7 @@ export function getEventEdges<TExtState = DefaultExtState>(
       }
 
       return targets
-        .map<Edge<TExtState> | undefined>(target => {
+        .map<Edge<TContext, TEvent> | undefined>(target => {
           try {
             const targetNode = target
               ? node.getRelativeStateNodes(target, undefined, false)[0]
@@ -82,38 +82,45 @@ export function getEventEdges<TExtState = DefaultExtState>(
             return undefined;
           }
         })
-        .filter(maybeEdge => maybeEdge !== undefined) as Array<Edge<TExtState>>;
+        .filter(maybeEdge => maybeEdge !== undefined) as Array<
+        Edge<TContext, TEvent>
+      >;
     })
   );
 }
 
-export function getEdges<TExtState = DefaultExtState>(
-  node: StateNode,
+export function getEdges<
+  TContext = DefaultContext,
+  TEvent extends EventObject = EventObject
+>(
+  node: StateNode<TContext>,
   options?: { depth: null | number }
-): Array<Edge<TExtState>> {
+): Array<Edge<TContext, TEvent>> {
   const { depth = null } = options || {};
-  const edges: Array<Edge<TExtState>> = [];
+  const edges: Array<Edge<TContext, TEvent>> = [];
 
   if (node.states && depth === null) {
-    Object.keys(node.states).forEach(stateKey => {
-      edges.push(...getEdges(node.states[stateKey]));
+    keys(node.states).forEach(stateKey => {
+      edges.push(...getEdges<TContext>(node.states[stateKey]));
     });
   } else if (depth && depth > 0) {
-    Object.keys(node.states).forEach(stateKey => {
-      edges.push(...getEdges(node.states[stateKey], { depth: depth - 1 }));
+    keys(node.states).forEach(stateKey => {
+      edges.push(
+        ...getEdges<TContext>(node.states[stateKey], { depth: depth - 1 })
+      );
     });
   }
 
-  Object.keys(node.on).forEach(event => {
-    edges.push(...getEventEdges(node, event));
+  keys(node.on).forEach(event => {
+    edges.push(...getEventEdges<TContext>(node, event));
   });
 
   return edges;
 }
 
-export function getAdjacencyMap<TExtState = DefaultExtState>(
-  node: StateNode<TExtState>,
-  extendedState?: any
+export function getAdjacencyMap<TContext = DefaultContext>(
+  node: StateNode<TContext>,
+  context?: TContext
 ): AdjacencyMap {
   const adjacency: AdjacencyMap = {};
 
@@ -129,8 +136,8 @@ export function getAdjacencyMap<TExtState = DefaultExtState>(
     adjacency[stateKey] = {};
 
     for (const event of events) {
-      const nextState = node.transition(stateValue, event, extendedState);
-      adjacency[stateKey][event] = { state: nextState.value };
+      const nextState = node.transition(stateValue, event, context);
+      adjacency[stateKey][event as string] = { state: nextState.value };
 
       findAdjacencies(nextState.value);
     }
@@ -141,43 +148,122 @@ export function getAdjacencyMap<TExtState = DefaultExtState>(
   return adjacency;
 }
 
-function eventToString(event: Event): string {
-  if (typeof event === 'string' || typeof event === 'number') {
-    return `${event}`;
-  }
+export function deserializeStateString(
+  valueContextString: string
+): { value: StateValue; context: any } {
+  const [valueString, contextString] = valueContextString.split(' | ');
 
-  const { type, ...rest } = event;
-
-  return `${type} | ${JSON.stringify(rest)}`;
+  return {
+    value: JSON.parse(valueString),
+    context: contextString === undefined ? undefined : JSON.parse(contextString)
+  };
 }
 
-export function getValueAdjacencyMap<TExtState = DefaultExtState>(
-  node: StateNode<TExtState>,
-  eventMap: Record<string, Event[]>
-): ValueAdjacencyMap {
-  const adjacency: ValueAdjacencyMap = {};
+export function serializeState<TContext>(state: State<TContext>): string {
+  const { value, context } = state;
+  return context === undefined
+    ? JSON.stringify(value)
+    : JSON.stringify(value) + ' | ' + JSON.stringify(context);
+}
 
-  const events = flatten(node.events.map(event => eventMap[event] || [event]));
+export function serializeEvent<TEvent extends EventObject>(
+  event: TEvent
+): string {
+  return JSON.stringify(event);
+}
 
-  function findAdjacencies(state: State<TExtState>) {
-    const { value, ext } = state;
-    const stateKey = JSON.stringify(value) + ' | ' + JSON.stringify(ext);
+export function deserializeEventString<TEvent extends EventObject>(
+  eventString: string
+): TEvent {
+  return JSON.parse(eventString) as TEvent;
+}
 
-    if (adjacency[stateKey]) {
+export interface ValueAdjMapOptions<TContext, TEvent extends EventObject> {
+  events: { [K in TEvent['type']]: Array<TEvent & { type: K }> };
+  filter: (state: State<TContext>) => boolean;
+  stateSerializer: (state: State<TContext>) => string;
+  eventSerializer: (event: TEvent) => string;
+}
+
+const defaultValueAdjMapOptions: ValueAdjMapOptions<any, any> = {
+  events: {},
+  filter: () => true,
+  stateSerializer: serializeState,
+  eventSerializer: serializeEvent
+};
+
+export class ValueAdjacency<TContext, TEvent extends EventObject> {
+  public mapping: ValueAdjacencyMap<TContext, TEvent>;
+  public options: ValueAdjMapOptions<TContext, TEvent>;
+
+  constructor(
+    public machine: StateMachine<TContext, any, TEvent>,
+    options?: Partial<ValueAdjMapOptions<TContext, TEvent>>
+  ) {
+    this.options = {
+      events: {},
+      stateSerializer: serializeState,
+      eventSerializer: serializeEvent,
+      ...options
+    } as ValueAdjMapOptions<TContext, TEvent>;
+    this.mapping = getValueAdjacencyMap(machine, options);
+  }
+
+  public reaches(stateValue: StateValue, context: TContext): boolean {
+    const resolvedStateValue = this.machine.resolve(stateValue);
+    const state = State.from(resolvedStateValue, context);
+
+    return !!this.mapping[this.options.stateSerializer(state)];
+  }
+}
+
+export function getValueAdjacencyMap<
+  TContext = DefaultContext,
+  TEvent extends EventObject = EventObject
+>(
+  node: StateNode<TContext, any, TEvent>,
+  options?: Partial<ValueAdjMapOptions<TContext, TEvent>>
+): ValueAdjacencyMap<TContext, TEvent> {
+  const optionsWithDefaults = {
+    events: {},
+    stateSerializer: serializeState,
+    eventSerializer: serializeEvent,
+    ...options
+  } as ValueAdjMapOptions<TContext, TEvent>;
+  const { filter, stateSerializer, eventSerializer } = optionsWithDefaults;
+  const events = {} as Record<TEvent['type'], Array<Event<TEvent>>>;
+  node.events.forEach(event => {
+    events[event] = [event];
+  });
+  Object.assign(events, optionsWithDefaults.events);
+
+  const adjacency: ValueAdjacencyMap<TContext, TEvent> = {};
+
+  function findAdjacencies(state: State<TContext, TEvent>) {
+    const { nextEvents } = state;
+    const stateHash = stateSerializer(state);
+
+    if (adjacency[stateHash]) {
       return;
     }
 
-    adjacency[stateKey] = {};
+    adjacency[stateHash] = {};
 
-    for (const event of events) {
+    const potentialEvents = flatten<TEvent>(
+      nextEvents.map(nextEvent => events[nextEvent] || [])
+    ).map(event => toEventObject(event));
+
+    for (const event of potentialEvents) {
       const nextState = node.transition(state, event);
 
-      adjacency[stateKey][eventToString(event)] = {
-        state: nextState.value,
-        ext: nextState.ext
-      };
+      if (
+        (!filter || filter(nextState)) &&
+        stateHash !== stateSerializer(nextState)
+      ) {
+        adjacency[stateHash][eventSerializer(event)] = nextState;
 
-      findAdjacencies(nextState);
+        findAdjacencies(nextState);
+      }
     }
   }
 
@@ -186,138 +272,157 @@ export function getValueAdjacencyMap<TExtState = DefaultExtState>(
   return adjacency;
 }
 
-export function getShortestPaths<TExtState = DefaultExtState>(
-  machine: StateNode<TExtState>,
-  extendedState?: any
-): PathMap {
+export function getShortestValuePaths<
+  TContext = DefaultContext,
+  TEvent extends EventObject = EventObject
+>(
+  machine: StateNode<TContext, any, TEvent>,
+  options: ValueAdjMapOptions<TContext, TEvent> = defaultValueAdjMapOptions
+): PathMap<TContext, TEvent> {
   if (!machine.states) {
     return EMPTY_MAP;
   }
-  const adjacency = getAdjacencyMap(machine, extendedState);
-  const initialStateId = JSON.stringify(machine.initialState.value);
-  const pathMap: PathMap = {
-    [initialStateId]: []
-  };
+  const adjacency = getValueAdjacencyMap<TContext, TEvent>(machine, options);
+  const pathMap: PathMap<TContext, TEvent> = {};
   const visited: Set<string> = new Set();
 
-  function util(stateValue: StateValue): PathMap {
-    const stateId = JSON.stringify(stateValue);
-    visited.add(stateId);
-    const eventMap = adjacency[stateId];
+  function util(state: State<TContext>): PathMap<TContext, TEvent> {
+    const stateKey = serializeState(state);
+    visited.add(stateKey);
+    const eventMap = adjacency[stateKey];
 
-    for (const event of Object.keys(eventMap)) {
-      const nextStateValue = eventMap[event].state;
+    for (const eventType of keys(eventMap)) {
+      const { value, context } = eventMap[eventType];
 
-      if (!nextStateValue) {
+      if (!value) {
         continue;
       }
 
-      const nextStateId = JSON.stringify(
-        toStateValue(nextStateValue, machine.delimiter)
-      );
+      const nextState = State.from(value, context);
+      const nextStateId = serializeState(nextState);
 
       if (
         !pathMap[nextStateId] ||
-        pathMap[nextStateId].length > pathMap[stateId].length + 1
+        pathMap[nextStateId].length > pathMap[stateKey].length + 1
       ) {
         pathMap[nextStateId] = [
-          ...(pathMap[stateId] || []),
-          { state: stateValue, event }
+          ...(pathMap[stateKey] || []),
+          {
+            state: { value, context: state.context },
+            event: deserializeEventString(eventType) as TEvent
+          }
         ];
       }
     }
 
-    for (const event of Object.keys(eventMap)) {
-      const nextStateValue = eventMap[event].state;
+    for (const event of keys(eventMap)) {
+      const { value, context } = eventMap[event];
 
-      if (!nextStateValue) {
+      if (!value) {
         continue;
       }
 
-      const nextStateId = JSON.stringify(nextStateValue);
+      const nextState = State.from(value, context);
+      const nextStateId = serializeState(State.from(value, context));
 
       if (visited.has(nextStateId)) {
         continue;
       }
 
-      util(nextStateValue);
+      util(nextState);
     }
 
     return pathMap;
   }
 
-  util(machine.initialState.value);
+  util(machine.initialState);
 
   return pathMap;
 }
 
-export function getShortestPathsAsArray<TExtState = DefaultExtState>(
-  machine: StateNode<TExtState>,
-  extendedState?: any
-): PathItem[] {
-  const result = getShortestPaths(machine, extendedState);
-  return Object.keys(result).map(key => ({
+export function getShortestPathsAsArray<
+  TContext = DefaultContext,
+  TEvent extends EventObject = EventObject
+>(
+  machine: StateNode<TContext, any, TEvent>
+): Array<PathItem<TContext, TEvent>> {
+  const result = getShortestValuePaths<TContext, TEvent>(
+    machine,
+    defaultValueAdjMapOptions
+  );
+  return keys(result).map(key => ({
     state: JSON.parse(key),
     path: result[key]
   }));
 }
 
-export function getSimplePaths<TExtState = DefaultExtState>(
-  machine: StateNode<TExtState>,
-  extendedState?: any
-): PathsMap {
+export function getSimplePaths<
+  TContext = DefaultContext,
+  TEvent extends EventObject = EventObject
+>(
+  machine: StateNode<TContext>,
+  options?: Partial<ValueAdjMapOptions<TContext, TEvent>>
+): PathsMap<TContext, TEvent> {
   if (!machine.states) {
     return EMPTY_MAP;
   }
 
-  const adjacency = getAdjacencyMap(machine, extendedState);
+  const adjacency = getValueAdjacencyMap(machine, options);
   const visited = new Set();
-  const path: Segment[] = [];
-  const paths: PathsMap = {};
+  const path: Array<Segment<TContext, TEvent>> = [];
+  const paths: PathsMap<TContext, TEvent> = {};
 
-  function util(fromPathId: string, toPathId: string) {
-    visited.add(fromPathId);
+  function util(fromStateSerial: string, toStateSerial: string) {
+    visited.add(fromStateSerial);
 
-    if (fromPathId === toPathId) {
-      paths[toPathId] = paths[toPathId] || [];
-      paths[toPathId].push([...path]);
+    if (fromStateSerial === toStateSerial) {
+      if (!paths[toStateSerial]) {
+        paths[toStateSerial] = {
+          state: deserializeStateString(toStateSerial),
+          paths: []
+        };
+      }
+      paths[toStateSerial].paths.push([...path]);
     } else {
-      for (const subEvent of Object.keys(adjacency[fromPathId])) {
-        const nextStateValue = adjacency[fromPathId][subEvent].state;
+      for (const subEvent of keys(adjacency[fromStateSerial])) {
+        const nextState = adjacency[fromStateSerial][subEvent];
 
-        if (!nextStateValue) {
+        if (!nextState) {
           continue;
         }
 
-        const nextStateId = JSON.stringify(nextStateValue);
+        const nextStateSerial = serializeState(nextState);
 
-        if (!visited.has(nextStateId)) {
-          path.push({ state: JSON.parse(fromPathId), event: subEvent });
-          util(nextStateId, toPathId);
+        if (!visited.has(nextStateSerial)) {
+          path.push({
+            state: deserializeStateString(fromStateSerial),
+            event: deserializeEventString(subEvent)
+          });
+          util(nextStateSerial, toStateSerial);
         }
       }
     }
 
     path.pop();
-    visited.delete(fromPathId);
+    visited.delete(fromStateSerial);
   }
 
-  const initialStateId = JSON.stringify(machine.initialState.value);
+  const initialStateSerial = serializeState(machine.initialState);
 
-  Object.keys(adjacency).forEach(nextStateId => {
-    util(initialStateId, nextStateId);
+  keys(adjacency).forEach(nextStateSerial => {
+    util(initialStateSerial, nextStateSerial);
   });
 
   return paths;
 }
 
-export function getSimplePathsAsArray<TExtState = DefaultExtState>(
-  machine: StateNode<TExtState>,
-  extendedState?: any
-): PathsItem[] {
-  const result = getSimplePaths(machine, extendedState);
-  return Object.keys(result).map(key => ({
-    state: JSON.parse(key),
-    paths: result[key]
-  }));
+export function getSimplePathsAsArray<
+  TContext = DefaultContext,
+  TEvent extends EventObject = EventObject
+>(
+  machine: StateNode<TContext>,
+  options?: ValueAdjMapOptions<TContext, TEvent>
+): Array<PathsItem<TContext, TEvent>> {
+  const result = getSimplePaths(machine, options);
+  return keys(result).map(key => result[key]);
 }
